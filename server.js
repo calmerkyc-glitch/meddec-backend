@@ -15,20 +15,45 @@ import { verifyEmailConfig } from './utils/emailService.js';
 
 dotenv.config();
 console.log('JWT_SECRET loaded:', !!process.env.JWT_SECRET);
+
+// Flexible CORS for frontend deployments
+const allowedOrigins = [
+  process.env.FRONTEND_URL || 'http://localhost:5174',
+  process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null,
+  'http://localhost:5173',
+  'http://localhost:3000',
+].filter(Boolean);
+
 const app = express();
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: process.env.FRONTEND_URL || "http://localhost:5174",
-    methods: ["GET", "POST"]
+    origin: allowedOrigins,
+    methods: ["GET", "POST"],
+    credentials: true,
   }
 });
 
 // Make io available to routes
 app.set('io', io);
 
-app.use(cors());
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+}));
 app.use(express.json());
+
+// Health check endpoint
+app.get('/', (req, res) => {
+  res.status(200).json({ message: 'MedDec Backend is running', status: 'online' });
+});
+
 app.use('/api/auth', authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/pharmacy', pharmacyRoutes);
