@@ -17,22 +17,17 @@ dotenv.config();
 console.log('JWT_SECRET loaded:', !!process.env.JWT_SECRET);
 const app = express();
 const server = createServer(app);
-const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:5174').split(',').map(url => url.trim());
 const io = new Server(server, {
   cors: {
-    origin: ALLOWED_ORIGINS,
-    methods: ["GET", "POST"],
-    credentials: true
+    origin: process.env.FRONTEND_URL || "http://localhost:5174",
+    methods: ["GET", "POST"]
   }
 });
 
 // Make io available to routes
 app.set('io', io);
 
-app.use(cors({
-  origin: ALLOWED_ORIGINS,
-  credentials: true
-}));
+app.use(cors());
 app.use(express.json());
 app.use('/api/auth', authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
@@ -107,7 +102,7 @@ io.on('connection', (socket) => {
 // Export io for use in routes
 export { io };
 
-const PORT = process.env.PORT || 5000;
+const PORT = Number(process.env.PORT || 5000);
 
 server.on('error', (error) => {
   if (error.code === 'EADDRINUSE') {
