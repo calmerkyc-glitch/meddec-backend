@@ -47,9 +47,13 @@ router.get('/chats', verifyToken, async (req, res) => {
 router.post('/orders/:orderId/chat', verifyToken, async (req, res) => {
   try {
     const { chatType = 'order-support' } = req.body;
+    console.log('[Chat] Creating chat for order:', req.params.orderId, 'by user:', req.user._id);
 
     const order = await Order.findOne({ orderId: req.params.orderId });
-    if (!order) return res.status(404).json({ error: 'Order not found' });
+    if (!order) {
+      console.error('[Chat] Order not found:', req.params.orderId);
+      return res.status(404).json({ error: 'Order not found' });
+    }
 
     // Check if user is authorized to chat about this order
     const isPatient = order.patient.id.toString() === req.user._id.toString();
@@ -57,6 +61,7 @@ router.post('/orders/:orderId/chat', verifyToken, async (req, res) => {
     const isLogistics = order.logistics?.id?.toString() === req.user._id.toString();
 
     if (!isPatient && !isPharmacy && !isLogistics) {
+      console.error('[Chat] User not authorized for order:', req.params.orderId);
       return res.status(403).json({ error: 'Not authorized to access this order chat' });
     }
 
@@ -68,6 +73,7 @@ router.post('/orders/:orderId/chat', verifyToken, async (req, res) => {
     });
 
     if (chat) {
+      console.log('[Chat] Chat already exists:', chat._id);
       return res.json(chat);
     }
 
@@ -117,6 +123,7 @@ router.post('/orders/:orderId/chat', verifyToken, async (req, res) => {
     });
 
     await chat.save();
+    console.log('[Chat] Chat created successfully:', chat._id);
 
     // Update users' active chats
     for (const participant of participants) {
@@ -133,14 +140,17 @@ router.post('/orders/:orderId/chat', verifyToken, async (req, res) => {
 
     // Send notification to other participants
     const otherParticipants = participants.filter(p => p.userId.toString() !== req.user._id.toString());
+    const io = req.app.get('io');
+    
     for (const participant of otherParticipants) {
       NotificationService.sendChatNotification(chat, req.user, participant.userId);
+      console.log('[Chat] Notification sent to participant:', participant.userId);
     }
 
     res.status(201).json(chat);
   } catch (error) {
-    console.error('Error creating chat:', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('[Chat] Error creating chat:', error.message);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
@@ -270,14 +280,20 @@ router.post('/chats/:chatId/messages', verifyToken, async (req, res) => {
 router.post('/orders/:orderId/request-call', verifyToken, async (req, res) => {
   try {
     const { target = 'auto' } = req.body;
+    console.log('[Call Request] User:', req.user._id, 'Order:', req.params.orderId, 'Target:', target);
+    
     const order = await Order.findOne({ orderId: req.params.orderId });
-    if (!order) return res.status(404).json({ error: 'Order not found' });
+    if (!order) {
+      console.error('[Call Request] Order not found:', req.params.orderId);
+      return res.status(404).json({ error: 'Order not found' });
+    }
 
     const isPatient = order.patient.id.toString() === req.user._id.toString();
     const isPharmacy = order.pharmacy?.id?.toString() === req.user._id.toString();
     const isLogistics = order.logistics?.id?.toString() === req.user._id.toString();
 
     if (!isPatient && !isPharmacy && !isLogistics) {
+      console.error('[Call Request] User not authorized for order:', req.params.orderId);
       return res.status(403).json({ error: 'Not authorized to request call for this order' });
     }
 
@@ -285,11 +301,17 @@ router.post('/orders/:orderId/request-call', verifyToken, async (req, res) => {
     let recipientRole = null;
 
     if (target === 'pharmacy') {
-      if (!order.pharmacy?.id) return res.status(400).json({ error: 'No pharmacy assigned to this order' });
+      if (!order.pharmacy?.id) {
+        console.error('[Call Request] No pharmacy assigned to order:', req.params.orderId);
+        return res.status(400).json({ error: 'No pharmacy assigned to this order' });
+      }
       recipientId = order.pharmacy.id;
       recipientRole = 'pharmacy';
     } else if (target === 'logistics') {
-      if (!order.logistics?.id) return res.status(400).json({ error: 'No logistics driver assigned yet' });
+      if (!order.logistics?.id) {
+        console.error('[Call Request] No logistics assigned to order:', req.params.orderId);
+        return res.status(400).json({ error: 'No logistics driver assigned yet' });
+      }
       recipientId = order.logistics.id;
       recipientRole = 'logistics';
     } else {
@@ -303,15 +325,94 @@ router.post('/orders/:orderId/request-call', verifyToken, async (req, res) => {
     }
 
     if (!recipientId) {
+      console.error('[Call Request] Unable to find recipient for order:', req.params.orderId);
       return res.status(400).json({ error: 'Unable to find a recipient for the call request' });
     }
 
-    NotificationService.sendCallRequestNotification(order, req.user, recipientId, recipientRole);
+    console.log('[Call Request] Sending notification to:', recipientId, 'Role:', recipientRole);
+    
+    const io = req.app.get('io');
+    if (!io) {
+      console.error('[Call Request] Socket.IO not available');
+      return res.status(500).json({ error: 'Real-time service unavailable' });
+    }
 
-    res.json({ message: 'Call request sent successfully', target: recipientRole });
+    // Send notification via NotificationService
+    NotificationService.sendCallRequestNotification(order, req.user, recipientId, recipientRole);
+    console.log('[Call Request] Notification sent successfully');
+
+    res.json({ 
+      message: 'Call request sent successfully', 
+      target: recipientRole,
+      recipientId,
+      orderId: order.orderId
+    });
   } catch (error) {
-    console.error('Error creating call request:', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('[Call Request] Error:', error.message);
+    res.status(500).json({ 
+      message: 'Server error',
+      error: error.message 
+    });
+  }
+});
+
+// Respond to a call request (accept/decline)
+router.post('/call-response', verifyToken, async (req, res) => {
+  try {
+    const { orderId, requesterId, response } = req.body;
+    
+    if (!['accepted', 'declined'].includes(response)) {
+      return res.status(400).json({ error: 'Invalid response. Must be "accepted" or "declined"' });
+    }
+
+    console.log('[Call Response] User:', req.user._id, 'Response:', response, 'Requester:', requesterId, 'Order:', orderId);
+
+    const order = await Order.findOne({ orderId });
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const requester = await User.findById(requesterId);
+    if (!requester) {
+      return res.status(404).json({ error: 'Requester not found' });
+    }
+
+    const io = req.app.get('io');
+    if (!io) {
+      return res.status(500).json({ error: 'Real-time service unavailable' });
+    }
+
+    // Send response notification to requester
+    const responseNotification = {
+      type: 'call_response',
+      title: response === 'accepted' ? 'Call Accepted' : 'Call Declined',
+      message: response === 'accepted' 
+        ? `${req.user.name} has accepted your call request for order ${orderId}`
+        : `${req.user.name} has declined your call request for order ${orderId}`,
+      orderId,
+      responderId: req.user._id,
+      responderName: req.user.name,
+      responderRole: req.user.role,
+      response,
+      timestamp: new Date()
+    };
+
+    // Send to requester's socket room
+    io.to(`user_${requesterId}`).emit('call_response', responseNotification);
+    console.log('[Call Response] Notification sent to requester:', requesterId);
+
+    res.json({ 
+      message: `Call ${response} successfully`,
+      response,
+      orderId,
+      requester: requester.name
+    });
+  } catch (error) {
+    console.error('[Call Response] Error:', error.message);
+    res.status(500).json({ 
+      message: 'Server error',
+      error: error.message 
+    });
   }
 });
 
